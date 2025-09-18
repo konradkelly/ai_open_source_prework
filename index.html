@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini MMORPG Client</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <script>
+        // Game state management
+        const gameState = {
+            myPlayerId: null,
+            players: {},
+            avatars: {},
+            worldImage: null,
+            viewport: {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0
+            },
+            needsRedraw: true
+        };
+
+        // Movement controls
+        const movementControls = {
+            keysPressed: {
+                up: false,
+                down: false,
+                left: false,
+                right: false
+            },
+            isMoving: false,
+            movementLoop: null
+        };
+
+        // Spell casting system
+        const spellSystem = {
+            isCasting: false,
+            castStartTime: 0,
+            castDuration: 2000, // 2 seconds
+            cooldown: 3000, // 3 seconds cooldown
+            lastCastTime: 0,
+            spellEffects: []
+        };
+
+        // Projectile system
+        const projectileSystem = {
+            projectiles: [],
+            speed: 8, // pixels per frame
+            maxDistance: 500, // maximum travel distance
+            cooldown: 500, // 0.5 seconds between shots
+            lastShotTime: 0
+        };
+
+        // Mouse tracking system
+        const mouseSystem = {
+            x: 0,
+            y: 0,
+            isOnScreen: false
+        };
+
+        // Avatar image cache to prevent flickering
+        const avatarImageCache = {};
+
+        // WebSocket connection
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectDelay = 3000;
+
+        // Get canvas and context
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Set canvas size to fill the browser window
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gameState.viewport.width = canvas.width;
+            gameState.viewport.height = canvas.height;
+            gameState.needsRedraw = true;
+        }
+
+        // Load the world map
+        function loadWorldMap() {
+            return new Promise((resolve) => {
+                const worldImage = new Image();
+                worldImage.onload = function() {
+                    gameState.worldImage = worldImage;
+                    resolve();
+                };
+                worldImage.src = 'world.jpg';
+            });
+        }
+
+        // WebSocket connection management
+        function connectWebSocket() {
+            try {
+                ws = new WebSocket('wss://codepath-mmorg.onrender.com');
+                
+                ws.onopen = function() {
+                    console.log('Connected to game server');
+                    reconnectAttempts = 0;
+                    joinGame();
+                };
+
+                ws.onmessage = function(event) {
+                    try {
+                        const message = JSON.parse(event.data);
+                        handleServerMessage(message);
+                    } catch (error) {
+                        console.error('Error parsing server message:', error);
+                    }
+                };
+
+                ws.onclose = function() {
+                    console.log('Disconnected from game server');
+                    attemptReconnect();
+                };
+
+                ws.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                };
+            } catch (error) {
+                console.error('Failed to connect to WebSocket:', error);
+                attemptReconnect();
+            }
+        }
+
+        function attemptReconnect() {
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                console.log(`Attempting to reconnect... (${reconnectAttempts}/${maxReconnectAttempts})`);
+                setTimeout(connectWebSocket, reconnectDelay);
+            } else {
+                console.error('Max reconnection attempts reached');
+            }
+        }
+
+        // Send message to server
+        function sendMessage(message) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(message));
+            } else {
+                console.error('WebSocket not connected');
+            }
+        }
+
+        // Join the game
+        function joinGame() {
+            sendMessage({
+                action: 'join_game',
+                username: 'Konrad'
+            });
+        }
+
+        // Movement command functions
+        function sendMoveCommand(direction) {
+            sendMessage({
+                action: 'move',
+                direction: direction
+            });
+        }
+
+        function sendStopCommand() {
+            sendMessage({
+                action: 'stop'
+            });
+        }
+
+        // Handle keyboard input
+        function handleKeyDown(event) {
+            // Prevent default browser behavior for arrow keys, WASD, space, and number keys
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'Digit1'].includes(event.code)) {
+                event.preventDefault();
+            }
+
+            // Handle spell casting
+            if (event.code === 'Space') {
+                handleSpellCast();
+                return;
+            }
+
+            // Handle projectile shooting
+            if (event.code === 'Digit1') {
+                handleProjectileShot();
+                return;
+            }
+
+            let direction = null;
+            switch (event.code) {
+                case 'ArrowUp':
+                case 'KeyW':
+                    direction = 'up';
+                    break;
+                case 'ArrowDown':
+                case 'KeyS':
+                    direction = 'down';
+                    break;
+                case 'ArrowLeft':
+                case 'KeyA':
+                    direction = 'left';
+                    break;
+                case 'ArrowRight':
+                case 'KeyD':
+                    direction = 'right';
+                    break;
+            }
+
+            if (direction && !movementControls.keysPressed[direction]) {
+                movementControls.keysPressed[direction] = true;
+                sendMoveCommand(direction);
+                startMovementLoop();
+            }
+        }
+
+        function handleKeyUp(event) {
+            let direction = null;
+            switch (event.code) {
+                case 'ArrowUp':
+                case 'KeyW':
+                    direction = 'up';
+                    break;
+                case 'ArrowDown':
+                case 'KeyS':
+                    direction = 'down';
+                    break;
+                case 'ArrowLeft':
+                case 'KeyA':
+                    direction = 'left';
+                    break;
+                case 'ArrowRight':
+                case 'KeyD':
+                    direction = 'right';
+                    break;
+            }
+
+            if (direction) {
+                movementControls.keysPressed[direction] = false;
+                checkMovementState();
+            }
+        }
+
+        // Movement loop management
+        function startMovementLoop() {
+            if (movementControls.isMoving) {
+                return; // Already moving
+            }
+
+            movementControls.isMoving = true;
+            movementControls.movementLoop = setInterval(() => {
+                // Send move commands for all currently pressed keys
+                Object.keys(movementControls.keysPressed).forEach(direction => {
+                    if (movementControls.keysPressed[direction]) {
+                        sendMoveCommand(direction);
+                    }
+                });
+            }, 175); // 10fps - much more reasonable movement speed
+        }
+
+        function stopMovementLoop() {
+            if (movementControls.movementLoop) {
+                clearInterval(movementControls.movementLoop);
+                movementControls.movementLoop = null;
+            }
+            movementControls.isMoving = false;
+        }
+
+        function checkMovementState() {
+            const anyKeyPressed = Object.values(movementControls.keysPressed).some(pressed => pressed);
+            
+            if (!anyKeyPressed && movementControls.isMoving) {
+                stopMovementLoop();
+                sendStopCommand();
+            }
+        }
+
+        // Spell casting functions
+        function handleSpellCast() {
+            const currentTime = Date.now();
+            
+            // Check if we can cast (not on cooldown and not already casting)
+            if (spellSystem.isCasting || (currentTime - spellSystem.lastCastTime) < spellSystem.cooldown) {
+                return;
+            }
+
+            // Start spell casting
+            spellSystem.isCasting = true;
+            spellSystem.castStartTime = currentTime;
+            gameState.needsRedraw = true;
+
+            // Create spell effect
+            if (gameState.myPlayerId && gameState.players[gameState.myPlayerId]) {
+                const myPlayer = gameState.players[gameState.myPlayerId];
+                createSpellEffect(myPlayer.x, myPlayer.y, myPlayer.facing);
+            }
+
+            // End spell casting after duration
+            setTimeout(() => {
+                spellSystem.isCasting = false;
+                spellSystem.lastCastTime = Date.now();
+                gameState.needsRedraw = true;
+            }, spellSystem.castDuration);
+        }
+
+        function createSpellEffect(x, y, facing) {
+            const effect = {
+                x: x,
+                y: y,
+                facing: facing,
+                startTime: Date.now(),
+                duration: 1000, // 1 second effect
+                particles: []
+            };
+
+            // Create particles for the spell effect
+            for (let i = 0; i < 8; i++) {
+                effect.particles.push({
+                    x: x + (Math.random() - 0.5) * 40,
+                    y: y + (Math.random() - 0.5) * 40,
+                    vx: (Math.random() - 0.5) * 4,
+                    vy: (Math.random() - 0.5) * 4,
+                    life: 1.0,
+                    decay: 0.02
+                });
+            }
+
+            spellSystem.spellEffects.push(effect);
+        }
+
+        function updateSpellEffects() {
+            const currentTime = Date.now();
+            
+            // Update and remove expired effects
+            spellSystem.spellEffects = spellSystem.spellEffects.filter(effect => {
+                const elapsed = currentTime - effect.startTime;
+                if (elapsed > effect.duration) {
+                    return false;
+                }
+
+                // Update particles
+                effect.particles.forEach(particle => {
+                    particle.x += particle.vx;
+                    particle.y += particle.vy;
+                    particle.life -= particle.decay;
+                    particle.vx *= 0.98; // Slow down
+                    particle.vy *= 0.98;
+                });
+
+                return true;
+            });
+        }
+
+        // Projectile functions
+        function handleProjectileShot() {
+            const currentTime = Date.now();
+            
+            // Check cooldown
+            if (currentTime - projectileSystem.lastShotTime < projectileSystem.cooldown) {
+                return;
+            }
+
+            // Get player position and facing direction
+            if (!gameState.myPlayerId || !gameState.players[gameState.myPlayerId]) {
+                return;
+            }
+
+            const myPlayer = gameState.players[gameState.myPlayerId];
+            createProjectile(myPlayer.x, myPlayer.y, myPlayer.facing);
+            projectileSystem.lastShotTime = currentTime;
+        }
+
+        function createProjectile(x, y, facing) {
+            const projectile = {
+                x: x,
+                y: y,
+                facing: facing,
+                startX: x,
+                startY: y,
+                vx: 0,
+                vy: 0,
+                life: 1.0,
+                size: 6,
+                trail: [] // For trail effect
+            };
+
+            // Calculate direction based on mouse position or character facing
+            let targetX, targetY;
+            
+            if (mouseSystem.isOnScreen) {
+                // Convert mouse canvas coordinates to world coordinates
+                targetX = mouseSystem.x + gameState.viewport.x;
+                targetY = mouseSystem.y + gameState.viewport.y;
+            } else {
+                // Use character facing direction as fallback
+                const player = gameState.players[gameState.myPlayerId];
+                if (player) {
+                    targetX = player.x;
+                    targetY = player.y;
+                    
+                    // Adjust target based on facing direction
+                    switch (facing) {
+                        case 'north':
+                            targetY -= 50;
+                            break;
+                        case 'south':
+                            targetY += 50;
+                            break;
+                        case 'east':
+                            targetX += 50;
+                            break;
+                        case 'west':
+                            targetX -= 50;
+                            break;
+                    }
+                }
+            }
+
+            // Calculate velocity towards target
+            const dx = targetX - x;
+            const dy = targetY - y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            if (distance > 0) {
+                projectile.vx = (dx / distance) * projectileSystem.speed;
+                projectile.vy = (dy / distance) * projectileSystem.speed;
+            } else {
+                // Fallback to character facing if no valid direction
+                switch (facing) {
+                    case 'north':
+                        projectile.vy = -projectileSystem.speed;
+                        break;
+                    case 'south':
+                        projectile.vy = projectileSystem.speed;
+                        break;
+                    case 'east':
+                        projectile.vx = projectileSystem.speed;
+                        break;
+                    case 'west':
+                        projectile.vx = -projectileSystem.speed;
+                        break;
+                }
+            }
+
+            projectileSystem.projectiles.push(projectile);
+            gameState.needsRedraw = true;
+        }
+
+        function updateProjectiles() {
+            projectileSystem.projectiles = projectileSystem.projectiles.filter(projectile => {
+                // Update position
+                projectile.x += projectile.vx;
+                projectile.y += projectile.vy;
+
+                // Add to trail
+                projectile.trail.push({ x: projectile.x, y: projectile.y });
+                if (projectile.trail.length > 8) {
+                    projectile.trail.shift();
+                }
+
+                // Check if projectile has traveled too far
+                const distance = Math.sqrt(
+                    Math.pow(projectile.x - projectile.startX, 2) + 
+                    Math.pow(projectile.y - projectile.startY, 2)
+                );
+
+                if (distance > projectileSystem.maxDistance) {
+                    return false;
+                }
+
+                // Check if projectile is off-screen
+                const canvasPos = worldToCanvas(projectile.x, projectile.y);
+                if (canvasPos.x < -50 || canvasPos.x > canvas.width + 50 || 
+                    canvasPos.y < -50 || canvasPos.y > canvas.height + 50) {
+                    return false;
+                }
+
+                return true;
+            });
+        }
+
+        // Handle server messages
+        function handleServerMessage(message) {
+            switch (message.action) {
+                case 'join_game':
+                    if (message.success) {
+                        gameState.myPlayerId = message.playerId;
+                        gameState.players = message.players;
+                        gameState.avatars = message.avatars;
+                        console.log('Joined game successfully');
+                        gameState.needsRedraw = true;
+                    } else {
+                        console.error('Failed to join game:', message.error);
+                    }
+                    break;
+
+                case 'players_moved':
+                    Object.assign(gameState.players, message.players);
+                    gameState.needsRedraw = true;
+                    break;
+
+                case 'player_joined':
+                    gameState.players[message.player.id] = message.player;
+                    gameState.avatars[message.avatar.name] = message.avatar;
+                    gameState.needsRedraw = true;
+                    break;
+
+                case 'player_left':
+                    delete gameState.players[message.playerId];
+                    gameState.needsRedraw = true;
+                    break;
+
+                default:
+                    console.log('Unknown message type:', message.action);
+            }
+        }
+
+        // Calculate viewport position to center on player
+        function updateViewport() {
+            if (!gameState.myPlayerId || !gameState.players[gameState.myPlayerId]) {
+                return;
+            }
+
+            const myPlayer = gameState.players[gameState.myPlayerId];
+            const mapSize = 2048;
+            const canvasWidth = gameState.viewport.width;
+            const canvasHeight = gameState.viewport.height;
+
+            // Calculate center position
+            let viewportX = myPlayer.x - canvasWidth / 2;
+            let viewportY = myPlayer.y - canvasHeight / 2;
+
+            // Clamp to map boundaries
+            viewportX = Math.max(0, Math.min(viewportX, mapSize - canvasWidth));
+            viewportY = Math.max(0, Math.min(viewportY, mapSize - canvasHeight));
+
+            gameState.viewport.x = viewportX;
+            gameState.viewport.y = viewportY;
+        }
+
+        // Convert world coordinates to canvas coordinates
+        function worldToCanvas(worldX, worldY) {
+            return {
+                x: worldX - gameState.viewport.x,
+                y: worldY - gameState.viewport.y
+            };
+        }
+
+        // Get or create cached avatar image
+        function getCachedAvatarImage(frameData) {
+            if (!avatarImageCache[frameData]) {
+                const img = new Image();
+                img.src = frameData;
+                avatarImageCache[frameData] = img;
+            }
+            return avatarImageCache[frameData];
+        }
+
+        // Render avatar
+        function renderAvatar(player) {
+            if (!player || !gameState.avatars[player.avatar]) {
+                return;
+            }
+
+            const avatar = gameState.avatars[player.avatar];
+            
+            // Handle west direction by using east frames
+            let frames;
+            let shouldFlip = false;
+            
+            if (player.facing === 'west') {
+                frames = avatar.frames['east'];
+                shouldFlip = true;
+            } else {
+                frames = avatar.frames[player.facing];
+            }
+            
+            if (!frames || frames.length === 0) {
+                return;
+            }
+
+            // Get the current animation frame
+            const frameIndex = player.animationFrame || 0;
+            const frameData = frames[frameIndex % frames.length];
+
+            if (!frameData) {
+                return;
+            }
+
+            // Convert world position to canvas position
+            const canvasPos = worldToCanvas(player.x, player.y);
+
+            // Get cached image
+            const img = getCachedAvatarImage(frameData);
+            
+            // Only draw if image is loaded
+            if (img.complete && img.naturalWidth > 0) {
+                // Calculate avatar size (assuming 32x32 or similar)
+                const avatarSize = 32;
+                const halfSize = avatarSize / 2;
+
+                // Check if this is the player casting a spell
+                const isMyPlayer = player.id === gameState.myPlayerId;
+                const isCasting = isMyPlayer && spellSystem.isCasting;
+
+                // Draw spell casting glow effect
+                if (isCasting) {
+                    const glowSize = avatarSize + 8;
+                    const glowHalfSize = glowSize / 2;
+                    
+                    // Create glow gradient
+                    const gradient = ctx.createRadialGradient(
+                        canvasPos.x, canvasPos.y, 0,
+                        canvasPos.x, canvasPos.y, glowHalfSize
+                    );
+                    gradient.addColorStop(0, 'rgba(255, 255, 0, 0.8)');
+                    gradient.addColorStop(0.5, 'rgba(255, 165, 0, 0.4)');
+                    gradient.addColorStop(1, 'rgba(255, 0, 0, 0)');
+                    
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(
+                        canvasPos.x - glowHalfSize,
+                        canvasPos.y - glowHalfSize,
+                        glowSize,
+                        glowSize
+                    );
+                }
+
+                // Draw avatar with horizontal flip for west direction
+                ctx.save();
+                
+                if (shouldFlip) {
+                    // Flip horizontally for west direction
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(img, 
+                        -(canvasPos.x + halfSize), 
+                        canvasPos.y - halfSize, 
+                        avatarSize, 
+                        avatarSize
+                    );
+                } else {
+                    // Normal drawing for other directions
+                    ctx.drawImage(img, 
+                        canvasPos.x - halfSize, 
+                        canvasPos.y - halfSize, 
+                        avatarSize, 
+                        avatarSize
+                    );
+                }
+                
+                ctx.restore();
+
+                // Draw spell casting indicator
+                if (isCasting) {
+                    const castProgress = (Date.now() - spellSystem.castStartTime) / spellSystem.castDuration;
+                    const indicatorY = canvasPos.y - halfSize - 25;
+                    
+                    // Casting bar background
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                    ctx.fillRect(canvasPos.x - 20, indicatorY, 40, 4);
+                    
+                    // Casting bar progress
+                    ctx.fillStyle = 'rgba(255, 255, 0, 0.8)';
+                    ctx.fillRect(canvasPos.x - 20, indicatorY, 40 * castProgress, 4);
+                }
+
+                // Draw username label
+                ctx.fillStyle = 'rgba(88, 101, 242, 1)';
+                ctx.fillRect(canvasPos.x - 20, canvasPos.y - halfSize - 20, 40, 16);
+                
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(player.username, canvasPos.x, canvasPos.y - halfSize - 8);
+            }
+        }
+
+        // Render spell effects
+        function renderSpellEffects() {
+            spellSystem.spellEffects.forEach(effect => {
+                effect.particles.forEach(particle => {
+                    if (particle.life > 0) {
+                        const canvasPos = worldToCanvas(particle.x, particle.y);
+                        
+                        // Draw particle
+                        ctx.save();
+                        ctx.globalAlpha = particle.life;
+                        ctx.fillStyle = `hsl(${(Date.now() * 0.1) % 360}, 100%, 50%)`;
+                        ctx.fillRect(canvasPos.x - 2, canvasPos.y - 2, 4, 4);
+                        ctx.restore();
+                    }
+                });
+            });
+        }
+
+        // Render projectiles
+        function renderProjectiles() {
+            projectileSystem.projectiles.forEach(projectile => {
+                const canvasPos = worldToCanvas(projectile.x, projectile.y);
+                
+                // Draw trail
+                ctx.save();
+                for (let i = 0; i < projectile.trail.length; i++) {
+                    const trailPos = worldToCanvas(projectile.trail[i].x, projectile.trail[i].y);
+                    const alpha = (i + 1) / projectile.trail.length * 0.3;
+                    
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = '#4A90E2'; // Blue color
+                    ctx.fillRect(trailPos.x - 2, trailPos.y - 2, 4, 4);
+                }
+                ctx.restore();
+
+                // Draw main projectile
+                ctx.save();
+                
+                // Create blue gradient
+                const gradient = ctx.createRadialGradient(
+                    canvasPos.x, canvasPos.y, 0,
+                    canvasPos.x, canvasPos.y, projectile.size
+                );
+                gradient.addColorStop(0, '#87CEEB'); // Light blue center
+                gradient.addColorStop(0.7, '#4A90E2'); // Medium blue
+                gradient.addColorStop(1, '#1E3A8A'); // Dark blue edge
+                
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(canvasPos.x, canvasPos.y, projectile.size, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Add glow effect
+                ctx.shadowColor = '#4A90E2';
+                ctx.shadowBlur = 10;
+                ctx.fillStyle = '#87CEEB';
+                ctx.beginPath();
+                ctx.arc(canvasPos.x, canvasPos.y, projectile.size * 0.7, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.restore();
+            });
+        }
+
+        // Main render function
+        function render() {
+            // Update spell effects and projectiles
+            updateSpellEffects();
+            updateProjectiles();
+
+            if (!gameState.needsRedraw) {
+                requestAnimationFrame(render);
+                return;
+            }
+
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Update viewport to center on player
+            updateViewport();
+
+            // Draw world map
+            if (gameState.worldImage) {
+                ctx.drawImage(
+                    gameState.worldImage,
+                    gameState.viewport.x, gameState.viewport.y, 
+                    gameState.viewport.width, gameState.viewport.height,
+                    0, 0, 
+                    gameState.viewport.width, gameState.viewport.height
+                );
+            }
+
+            // Render all players
+            Object.values(gameState.players).forEach(player => {
+                renderAvatar(player);
+            });
+
+            // Render spell effects
+            renderSpellEffects();
+
+            // Render projectiles
+            renderProjectiles();
+
+            gameState.needsRedraw = false;
+            requestAnimationFrame(render);
+        }
+
+        // Initialize the game
+        async function init() {
+            resizeCanvas();
+            await loadWorldMap();
+            connectWebSocket();
+            setupKeyboardControls();
+            setupMouseControls();
+            render();
+        }
+
+        // Setup keyboard event listeners
+        function setupKeyboardControls() {
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+        }
+
+        // Setup mouse event listeners
+        function setupMouseControls() {
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseenter', handleMouseEnter);
+            canvas.addEventListener('mouseleave', handleMouseLeave);
+            canvas.addEventListener('click', handleMouseClick);
+        }
+
+        // Handle mouse movement
+        function handleMouseMove(event) {
+            const rect = canvas.getBoundingClientRect();
+            mouseSystem.x = event.clientX - rect.left;
+            mouseSystem.y = event.clientY - rect.top;
+            mouseSystem.isOnScreen = true;
+        }
+
+        // Handle mouse entering canvas
+        function handleMouseEnter(event) {
+            mouseSystem.isOnScreen = true;
+        }
+
+        // Handle mouse leaving canvas
+        function handleMouseLeave(event) {
+            mouseSystem.isOnScreen = false;
+        }
+
+        // Handle mouse click
+        function handleMouseClick(event) {
+            // Prevent default browser behavior (context menu, text selection, etc.)
+            event.preventDefault();
+            
+            // Only handle left click (button 0)
+            if (event.button === 0) {
+                handleProjectileShot();
+            }
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            resizeCanvas();
+        });
+
+        // Start the game when page loads
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
